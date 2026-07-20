@@ -7,24 +7,23 @@ import {ITrancheStrategy} from "../interfaces/ITrancheStrategy.sol";
 
 /// @notice Batch keeper helper for settlement plus per-Tranche reports.
 contract Keeper is Authorized {
-    event SettledAndReported(address indexed caller, uint256 trancheCount);
+    event SettledAndReported(address indexed caller, address indexed controller, uint256 trancheCount);
 
-    ITrancheController public immutable CONTROLLER;
+    constructor(address _authorizer) Authorized(_authorizer) {}
 
-    constructor(address _authorizer, address _controller) Authorized(_authorizer) {
+    /// @notice Settle and report every Tranche registered with `_controller`.
+    /// @dev One Keeper can service every controller sharing its Authorizer.
+    function settleAndReport(address _controller) external isAuthorized(KEEPER_ROLE) {
         require(_controller != address(0), "ZERO controller");
-        CONTROLLER = ITrancheController(_controller);
-    }
+        ITrancheController controller = ITrancheController(_controller);
+        controller.settle();
 
-    function settleAndReport() external isAuthorized(KEEPER_ROLE) {
-        CONTROLLER.settle();
-
-        address[] memory tranches = CONTROLLER.getTranchesByPriority();
+        address[] memory tranches = controller.getTranchesByPriority();
         uint256 trancheCount = tranches.length;
         for (uint256 i = 0; i < trancheCount; ++i) {
             ITrancheStrategy(tranches[i]).report();
         }
 
-        emit SettledAndReported(msg.sender, trancheCount);
+        emit SettledAndReported(msg.sender, _controller, trancheCount);
     }
 }

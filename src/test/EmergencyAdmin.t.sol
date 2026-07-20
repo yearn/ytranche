@@ -4,6 +4,34 @@ pragma solidity ^0.8.18;
 import "forge-std/Test.sol";
 import {Setup} from "./utils/Setup.sol";
 import {ITrancheStrategy} from "../interfaces/ITrancheStrategy.sol";
+import {Authorizer} from "../periphery/Authorizer.sol";
+import {EmergencyAdmin} from "../periphery/EmergencyAdmin.sol";
+
+contract MockEmergencyCallTarget {
+    error MockFailure(uint256 code);
+
+    address public lastCaller;
+    uint256 public value;
+
+    function setValue(uint256 _value) external returns (uint256, address) {
+        lastCaller = msg.sender;
+        value = _value;
+        return (_value, msg.sender);
+    }
+
+    function setOtherValue(uint256 _value) external {
+        lastCaller = msg.sender;
+        value = _value;
+    }
+
+    function revertWithReason() external pure {
+        revert("boom");
+    }
+
+    function revertWithCustomError(uint256 _code) external pure {
+        revert MockFailure(_code);
+    }
+}
 
 /// @notice Central {EmergencyAdmin} — halts the main vault and strategies through
 ///   the Yearn V3 primitives. Shutdowns are management-gated; emergency actions
@@ -156,5 +184,149 @@ contract EmergencyAdminTest is Setup {
         vm.prank(governance);
         emergencyAdmin.pauseVault(address(aTranche));
         assertTrue(ITrancheStrategy(address(aTranche)).isPaused());
+    }
+}
+
+/// @notice Selector-scoped arbitrary call permissions. This fixture stays tiny;
+///         authorization tests should not need a whale-sized vault deployment.
+contract EmergencyAdminPassthroughTest is Test {
+    Authorizer internal authorizer;
+    EmergencyAdmin internal emergencyAdmin;
+    MockEmergencyCallTarget internal target;
+    MockEmergencyCallTarget internal otherTarget;
+
+    address internal governance = makeAddr("passthrough governance");
+    address internal management = makeAddr("passthrough management");
+    address internal operator = makeAddr("passthrough operator");
+
+    function setUp() public {
+        authorizer = new Authorizer(governance, management);
+        emergencyAdmin = new EmergencyAdmin(address(authorizer));
+        target = new MockEmergencyCallTarget();
+        otherTarget = new MockEmergencyCallTarget();
+    }
+
+    function _grant(address _account, address _target, bytes4 _selector) internal {
+        bytes32 role = keccak256(abi.encodePacked(_target, _selector));
+        vm.prank(governance);
+        authorizer.grantRole(role, _account);
+    }
+
+    function test_getRole_hashesPackedTargetAndSelector() public view {
+        bytes4 selector = MockEmergencyCallTarget.setValue.selector;
+        bytes32 expected = keccak256(abi.encodePacked(address(target), selector));
+
+        assertEq(emergencyAdmin.getRole(address(target), selector), expected);
+    }
+
+    function test_execute_forwardsCalldataAndReturnsData() public {
+        bytes memory data = abi.encodeCall(MockEmergencyCallTarget.setValue, (42));
+        _grant(operator, address(target), MockEmergencyCallTarget.setValue.selector);
+
+        vm.expectCall(address(target), data);
+        vm.prank(operator);
+        bytes memory result = emergencyAdmin.execute(address(target), data);
+
+        (uint256 returnedValue, address seenCaller) = abi.decode(result, (uint256, address));
+        assertEq(returnedValue, 42, "return value");
+        assertEq(seenCaller, address(emergencyAdmin), "returned caller");
+        assertEq(target.lastCaller(), address(emergencyAdmin), "target caller");
+        assertEq(target.value(), 42, "forwarded argument");
+    }
+
+    function testFuzz_execute_roleAllowsAnyArgumentsForSelector(uint256 _first, uint256 _second) public {
+        _grant(operator, address(target), MockEmergencyCallTarget.setValue.selector);
+
+        vm.startPrank(operator);
+        emergencyAdmin.execute(address(target), abi.encodeCall(MockEmergencyCallTarget.setValue, (_first)));
+        emergencyAdmin.execute(address(target), abi.encodeCall(MockEmergencyCallTarget.setValue, (_second)));
+        vm.stopPrank();
+
+        assertEq(target.value(), _second, "second argument forwarded");
+    }
+
+    function test_execute_rejectsWrongTarget() public {
+        bytes memory data = abi.encodeCall(MockEmergencyCallTarget.setValue, (42));
+        _grant(operator, address(target), MockEmergencyCallTarget.setValue.selector);
+
+        vm.prank(operator);
+        vm.expectRevert(bytes("!authorized"));
+        emergencyAdmin.execute(address(otherTarget), data);
+    }
+
+    function test_execute_rejectsWrongSelector() public {
+        bytes memory data = abi.encodeCall(MockEmergencyCallTarget.setOtherValue, (42));
+        _grant(operator, address(target), MockEmergencyCallTarget.setValue.selector);
+
+        vm.prank(operator);
+        vm.expectRevert(bytes("!authorized"));
+        emergencyAdmin.execute(address(target), data);
+    }
+
+    function test_execute_rejectsUngrantedCaller() public {
+        bytes memory data = abi.encodeCall(MockEmergencyCallTarget.setValue, (42));
+
+        vm.prank(operator);
+        vm.expectRevert(bytes("!authorized"));
+        emergencyAdmin.execute(address(target), data);
+    }
+
+    function test_execute_governanceHasNoBypass() public {
+        bytes memory data = abi.encodeCall(MockEmergencyCallTarget.setValue, (42));
+
+        vm.prank(governance);
+        vm.expectRevert(bytes("!authorized"));
+        emergencyAdmin.execute(address(target), data);
+    }
+
+    function test_execute_governanceCanUseExplicitRole() public {
+        bytes memory data = abi.encodeCall(MockEmergencyCallTarget.setValue, (42));
+        _grant(governance, address(target), MockEmergencyCallTarget.setValue.selector);
+
+        vm.prank(governance);
+        emergencyAdmin.execute(address(target), data);
+
+        assertEq(target.value(), 42);
+    }
+
+    function test_execute_rejectsCalldataWithoutSelector() public {
+        _expectNoSelector(hex"");
+        _expectNoSelector(hex"01");
+        _expectNoSelector(hex"0102");
+        _expectNoSelector(hex"010203");
+    }
+
+    function test_execute_rejectsNonContractTarget() public {
+        address nonContract = makeAddr("not a contract");
+        bytes memory data = abi.encodeCall(MockEmergencyCallTarget.setValue, (42));
+        _grant(operator, nonContract, MockEmergencyCallTarget.setValue.selector);
+
+        vm.prank(operator);
+        vm.expectRevert(bytes("Address: call to non-contract"));
+        emergencyAdmin.execute(nonContract, data);
+    }
+
+    function test_execute_bubblesStringRevert() public {
+        bytes memory data = abi.encodeCall(MockEmergencyCallTarget.revertWithReason, ());
+        _grant(operator, address(target), MockEmergencyCallTarget.revertWithReason.selector);
+
+        vm.prank(operator);
+        vm.expectRevert(bytes("boom"));
+        emergencyAdmin.execute(address(target), data);
+    }
+
+    function test_execute_bubblesCustomError() public {
+        uint256 code = 73;
+        bytes memory data = abi.encodeCall(MockEmergencyCallTarget.revertWithCustomError, (code));
+        _grant(operator, address(target), MockEmergencyCallTarget.revertWithCustomError.selector);
+
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(MockEmergencyCallTarget.MockFailure.selector, code));
+        emergencyAdmin.execute(address(target), data);
+    }
+
+    function _expectNoSelector(bytes memory _data) internal {
+        vm.expectRevert(bytes("NO_SELECTOR"));
+        emergencyAdmin.execute(address(target), _data);
     }
 }

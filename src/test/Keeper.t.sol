@@ -2,6 +2,8 @@
 pragma solidity ^0.8.18;
 
 import {Setup} from "./utils/Setup.sol";
+import {Hook} from "../Hook.sol";
+import {TrancheController} from "../TrancheController.sol";
 import {Keeper as PeripheryKeeper} from "../periphery/Keeper.sol";
 import {TrancheStrategy} from "../TrancheStrategy.sol";
 import {ITrancheStrategy} from "../interfaces/ITrancheStrategy.sol";
@@ -9,12 +11,12 @@ import {ITrancheStrategy} from "../interfaces/ITrancheStrategy.sol";
 contract KeeperTest is Setup {
     PeripheryKeeper public batchKeeper;
 
-    event SettledAndReported(address indexed caller, uint256 trancheCount);
+    event SettledAndReported(address indexed caller, address indexed controller, uint256 trancheCount);
 
     function setUp() public override {
         super.setUp();
 
-        batchKeeper = new PeripheryKeeper(address(authorizer), address(controller));
+        batchKeeper = new PeripheryKeeper(address(authorizer));
 
         bytes32 keeperRole = authorizer.KEEPER_ROLE();
         vm.prank(management);
@@ -28,7 +30,7 @@ contract KeeperTest is Setup {
     function test_settleAndReport_requiresKeeperRole() public {
         vm.prank(alice);
         vm.expectRevert(bytes("!authorized"));
-        batchKeeper.settleAndReport();
+        batchKeeper.settleAndReport(address(controller));
     }
 
     function test_settleAndReport_allowsKeeperRoleHolder() public {
@@ -37,7 +39,7 @@ contract KeeperTest is Setup {
         authorizer.grantRole(keeperRole, alice);
 
         vm.prank(alice);
-        batchKeeper.settleAndReport();
+        batchKeeper.settleAndReport(address(controller));
     }
 
     function test_settleAndReport_settlesAndReportsEveryTranche() public {
@@ -52,7 +54,7 @@ contract KeeperTest is Setup {
         uint256 eLastReport = ITrancheStrategy(address(eTranche)).lastReport();
 
         vm.prank(keeper);
-        batchKeeper.settleAndReport();
+        batchKeeper.settleAndReport(address(controller));
 
         assertEq(controller.pendingExcess(address(aTranche)), 0, "A pending");
         assertEq(controller.pendingExcess(address(bTranche)), 0, "B pending");
@@ -63,20 +65,20 @@ contract KeeperTest is Setup {
         assertGt(ITrancheStrategy(address(eTranche)).lastReport(), eLastReport, "E reported");
     }
 
-    /// §6.7 — emits SettledAndReported(caller, trancheCount) with the live count.
+    /// §6.7 — emits SettledAndReported(caller, controller, trancheCount) with the live count.
     function test_settleAndReport_emitsEventWithCount() public {
         _depositA(alice, 10e18);
-        vm.expectEmit(true, false, false, true, address(batchKeeper));
-        emit SettledAndReported(keeper, 3); // A, B, E registered
+        vm.expectEmit(true, true, false, true, address(batchKeeper));
+        emit SettledAndReported(keeper, address(controller), 3); // A, B, E registered
         vm.prank(keeper);
-        batchKeeper.settleAndReport();
+        batchKeeper.settleAndReport(address(controller));
     }
 
     /// §6.7 — governance is a superuser via `isAuthorized`, so it can call too.
     function test_settleAndReport_allowsGovernanceCaller() public {
         _depositA(alice, 10e18);
         vm.prank(governance);
-        batchKeeper.settleAndReport();
+        batchKeeper.settleAndReport(address(controller));
     }
 
     /// §6.7 — the batch is driven by the controller's live priority list, so a
@@ -111,7 +113,58 @@ contract KeeperTest is Setup {
         uint256 before = d.lastReport();
         skip(1);
         vm.prank(keeper);
-        batchKeeper.settleAndReport();
+        batchKeeper.settleAndReport(address(controller));
         assertGt(d.lastReport(), before, "D reported");
+    }
+
+    function test_settleAndReport_rejectsZeroController() public {
+        vm.prank(keeper);
+        vm.expectRevert(bytes("ZERO controller"));
+        batchKeeper.settleAndReport(address(0));
+    }
+
+    function test_settleAndReport_servicesOnlySelectedController() public {
+        TrancheController secondController =
+            new TrancheController(address(asset), address(mainVault), address(authorizer));
+        Hook secondHook = new Hook(address(authorizer), address(secondController));
+        ITrancheStrategy secondTranche = ITrancheStrategy(
+            address(
+                new TrancheStrategy(
+                    address(asset),
+                    "Second Controller Tranche",
+                    "trSECOND",
+                    address(secondController),
+                    address(secondHook),
+                    address(authorizer)
+                )
+            )
+        );
+
+        vm.prank(governance);
+        secondController.registerTranche(address(secondTranche), 0, 0);
+
+        secondTranche.setProfitMaxUnlockTime(0);
+        secondTranche.setKeeper(address(batchKeeper));
+        secondTranche.setProfitLimitRatio(type(uint16).max);
+        secondTranche.setLossLimitRatio(uint16(MAX_BPS - 1));
+
+        uint256 aLastReport = ITrancheStrategy(address(aTranche)).lastReport();
+        uint256 bLastReport = ITrancheStrategy(address(bTranche)).lastReport();
+        uint256 eLastReport = ITrancheStrategy(address(eTranche)).lastReport();
+        uint256 secondLastReport = secondTranche.lastReport();
+
+        assertEq(controller.tranchesLength(), 3, "primary count");
+        assertEq(secondController.tranchesLength(), 1, "second count");
+
+        skip(1);
+        vm.expectEmit(true, true, false, true, address(batchKeeper));
+        emit SettledAndReported(keeper, address(secondController), 1);
+        vm.prank(keeper);
+        batchKeeper.settleAndReport(address(secondController));
+
+        assertGt(secondTranche.lastReport(), secondLastReport, "second reported");
+        assertEq(ITrancheStrategy(address(aTranche)).lastReport(), aLastReport, "primary A untouched");
+        assertEq(ITrancheStrategy(address(bTranche)).lastReport(), bLastReport, "primary B untouched");
+        assertEq(ITrancheStrategy(address(eTranche)).lastReport(), eLastReport, "primary E untouched");
     }
 }

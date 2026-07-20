@@ -134,11 +134,17 @@ admin relationships. Core handoff roles are locked.
 - shut down a vault,
 - shut down a strategy,
 - call strategy `emergencyWithdraw`,
-- set a vault strategy's max debt to zero.
+- set a vault strategy's max debt to zero,
+- forward calldata for an explicitly approved target and function selector.
 
 The contract must hold the needed Yearn vault roles for those actions to land.
 Shutdown actions are management-gated. Pause, emergency withdraw, and max-debt
 zero actions are emergency-gated.
+
+Arbitrary calls use the strict role
+`keccak256(abi.encodePacked(target, selector))`; governance has no implicit
+bypass. A grant authorizes every argument payload for that target and selector,
+not one exact calldata blob. Calls are nonpayable and ordinary EOAs are rejected.
 
 ## Current Test Configuration
 

@@ -600,7 +600,7 @@ contract TrancheController is Authorized {
 
         IERC4626 _reserveVault = reserveVault;
         uint256 sharesToRedeem = _min(_reserveVault.maxRedeem(address(this)), _reserveVault.previewWithdraw(_amount));
-  
+
         if (_reserveVault.previewRedeem(sharesToRedeem) == 0) return 0;
 
         received = _reserveVault.redeem(sharesToRedeem, address(this), address(this));

@@ -3,6 +3,7 @@ pragma solidity ^0.8.18;
 
 import {IVault} from "@yearn-vaults/interfaces/IVault.sol";
 import {IStrategy} from "@tokenized-strategy/interfaces/IStrategy.sol";
+import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 
 import {Authorized} from "./Authorized.sol";
 
@@ -17,13 +18,15 @@ import {Authorized} from "./Authorized.sol";
  *           - {shutdownStrategy}  — `shutdownStrategy()` on a strategy
  *           - {emergencyWithdraw} — `emergencyWithdraw()` on a strategy
  *           - {zeroMaxDebtForStrategy} — sets a vault strategy's max debt to 0
+ *           - {execute} — forwards calldata to an explicitly authorized target
  *
  *  For these to land, this contract must hold the vault's `EMERGENCY_MANAGER`
  *  and `MAX_DEBT_MANAGER` roles and be set as each strategy's `emergencyAdmin`
  *  (`setEmergencyAdmin`).
  *
- *  Halt-only by design: there is no unpause here. A vault pause is reversible by
- *  an `EMERGENCY_MANAGER` holder; a strategy pause only by its own management.
+ *  The dedicated helpers are halt-only: there is no unpause helper here. An
+ *  `execute` role permits every calldata payload sharing its target and selector,
+ *  so it must only be granted for deliberately chosen emergency operations.
  */
 contract EmergencyAdmin is Authorized {
     constructor(address _authorizer) Authorized(_authorizer) {}
@@ -56,5 +59,27 @@ contract EmergencyAdmin is Authorized {
     ///         Requires this contract to hold the vault's MAX_DEBT_MANAGER role.
     function zeroMaxDebtForStrategy(address _vault, address _strategy) external isAuthorized(EMERGENCY_ROLE) {
         IVault(_vault).update_max_debt_for_strategy(_strategy, 0);
+    }
+
+    /// @notice Role required to call `_selector` on `_target` through {execute}.
+    /// @dev The fixed-width packed encoding is `target (20 bytes) || selector (4 bytes)`.
+    function getRole(address _target, bytes4 _selector) public pure returns (bytes32) {
+        return keccak256(abi.encodePacked(_target, _selector));
+    }
+
+    /// @notice Forward arbitrary calldata to `_target` after checking the strict
+    ///         role for that target and function selector. The role covers every
+    ///         argument payload for the selector. No governance bypass applies.
+    function execute(address _target, bytes calldata _data)
+        external
+        hasRole(_getRole(_target, _data))
+        returns (bytes memory)
+    {
+        return Address.functionCall(_target, _data);
+    }
+
+    function _getRole(address _target, bytes calldata _data) private pure returns (bytes32) {
+        require(_data.length >= 4, "NO_SELECTOR");
+        return getRole(_target, bytes4(_data[:4]));
     }
 }
