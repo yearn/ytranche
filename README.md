@@ -31,6 +31,8 @@ Supporting contracts:
 - `Hook`: rate limits, deposit caps, main-vault deposit gating, and withdrawal caps.
 - `Authorizer`: shared role authority for controller, hook, and emergency flows.
 - `EmergencyAdmin`: centralized pause, shutdown, emergency withdraw, and max-debt-zero actions.
+- `Keeper`: settles a controller and reports every registered Tranche.
+- `ReportAndSettleExecutor`: one-caller, one-system atomic reporting and settlement route.
 
 ## TrancheController
 
@@ -84,6 +86,36 @@ Tranches.
 
 The reserve is optional. It must be a same-asset ERC-4626 vault when set. It is
 a settlement backstop, not a redemption source.
+
+## Atomic Report And Settlement Executor
+
+`ReportAndSettleExecutor` fixes the complete operation at deployment: caller,
+controller, Keeper, ordered vault/strategy report steps, default queues, and
+registered Tranches. A successful `execute(controller)` call reports each leaf
+strategy, processes each report into its owning vault, folds nested vaults into
+their parents, then calls `Keeper.settleAndReport`. Any failure reverts the
+entire transaction.
+
+Nested Yearn vaults are explicit route steps. Their debt-bearing leaf
+strategies are reported and processed first; the nested vault is then processed
+into its parent without calling a nonexistent strategy `report()` entry point.
+Every covered vault must have all of its current debt represented by the fixed
+route. Queue changes, new out-of-route debt, strategy removal, Tranche changes,
+or an Authorizer mismatch stop execution before reporting starts.
+
+The executor has no arbitrary-call, configuration setter, value,
+`delegatecall`, fallback, or partial-execution surface. Deployment does not
+grant permissions. Operations must separately grant:
+
+- the executor keeper access on each leaf Tokenized Strategy;
+- the executor Yearn `REPORTING_MANAGER` role on each covered vault;
+- both the executor and the `Keeper` contract `KEEPER_ROLE` in the shared
+  `Authorizer`; and
+- the `Keeper` contract as keeper on every registered Tranche strategy.
+
+Those grants should be applied only after independently verifying the deployed
+immutable route and `OPERATION_HASH`. Revoking any one of them disables the
+route without giving the executor a way to restore itself.
 
 ## Hook
 
@@ -169,9 +201,10 @@ make test
 
 Current root suite:
 
-- 86 passing
-- 1 skipped Spark fork sanity test
+- 186 passing
+- 0 failing or skipped
 
 Tests cover controller settlement, reserve behavior, Tranche deposits and
 withdrawals, cooldowns, hook limits and gating, emergency actions, role
-handoffs, insertion/deprecation, and loss/profit waterfall behavior.
+handoffs, insertion/deprecation, loss/profit waterfall behavior, and atomic
+report/process-report/settlement execution.
