@@ -198,6 +198,10 @@ contract ReportAndSettleExecutorTest is Setup {
     function test_queue_and_tranche_registration_changes_are_detected() public {
         address[] memory emptyQueue = new address[](0);
         mainVault.set_default_queue(emptyQueue);
+        ReportAndSettleExecutor changedQueue =
+            _deploySingleVaultExecutor(address(mainVault), address(riskyStrategy), true);
+        assertNotEq(changedQueue.EXPECTED_QUEUES_HASH(), executor.EXPECTED_QUEUES_HASH(), "queue digest unchanged");
+        assertNotEq(changedQueue.OPERATION_HASH(), executor.OPERATION_HASH(), "operation identity ignored queue");
         vm.prank(automation);
         vm.expectRevert(abi.encodeWithSelector(ReportAndSettleExecutor.QueueChanged.selector, address(mainVault)));
         executor.execute(address(controller));

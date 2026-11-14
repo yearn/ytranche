@@ -42,6 +42,7 @@ contract ReportAndSettleExecutor {
     address public immutable KEEPER;
     address public immutable AUTHORIZER;
     bytes32 public immutable EXPECTED_TRANCHES_HASH;
+    bytes32 public immutable EXPECTED_QUEUES_HASH;
     bytes32 public immutable OPERATION_HASH;
 
     ReportStep[] internal reportSteps;
@@ -125,6 +126,13 @@ contract ReportAndSettleExecutor {
         KEEPER = _keeper;
         AUTHORIZER = authorizer;
         EXPECTED_TRANCHES_HASH = keccak256(abi.encode(ITrancheController(_controller).getTranchesByPriority()));
+        bytes32 queuesHash;
+        uint256 vaultCount = vaults.length;
+        for (uint256 i; i < vaultCount; ++i) {
+            address vault = vaults[i];
+            queuesHash = keccak256(abi.encode(queuesHash, vault, expectedQueueHash[vault]));
+        }
+        EXPECTED_QUEUES_HASH = queuesHash;
         OPERATION_HASH = keccak256(
             abi.encode(
                 block.chainid,
@@ -132,10 +140,12 @@ contract ReportAndSettleExecutor {
                 _controller,
                 mainVault,
                 _keeper,
+                authorizer,
                 _vaults,
                 _strategies,
                 _callReport,
-                EXPECTED_TRANCHES_HASH
+                EXPECTED_TRANCHES_HASH,
+                queuesHash
             )
         );
         _validateSystem();
